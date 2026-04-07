@@ -93,13 +93,13 @@ class CacheManager:
         if data is None:
             return None
         try:
-            import io
-            return pd.read_parquet(io.BytesIO(bytes(data)))
+            import io, json
+            return pd.read_json(io.StringIO(data))
         except Exception:
             return None
 
     def set_df(self, key: str, df: pd.DataFrame, ttl: int = 300) -> None:
-        import io
-        buf = io.BytesIO()
-        df.to_parquet(buf)
-        self.set(f"df:{key}", list(buf.getvalue()), ttl=ttl)
+        try:
+            self.set(f"df:{key}", df.to_json(), ttl=ttl)
+        except Exception:
+            pass

@@ -6,4 +6,3 @@ yfinance>=0.2.40
 pandas>=2.0.0
 numpy>=1.26.0
 pyyaml>=6.0
-pyarrow>=14.0.0
