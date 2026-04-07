@@ -93,6 +93,7 @@ def analyze(req: AnalyzeRequest):
     try:
         from data.collectors.yfinance_client import YFinanceClient
         from data.processors.data_processor import DataProcessor
+        from data.processors.feature_engine import FeatureEngine
         from analysis.fundamental import FundamentalAnalyzer
         from analysis.technical import TechnicalAnalyzer
         from analysis.macro import MacroAnalyzer
@@ -102,68 +103,111 @@ def analyze(req: AnalyzeRequest):
         from analysis.scenario import ScenarioEngine
         from scoring.engine import ScoringEngine
         from scoring.recommender import Recommender
-        import yaml, pathlib
+        import yaml, pathlib, pandas as pd
 
+        # ── weights 로드 ──────────────────────────────────────────────────
         weights_path = pathlib.Path(__file__).parent / "config/weights.yaml"
         with open(weights_path) as f:
             weights = yaml.safe_load(f)
 
+        # ── 데이터 수집 ───────────────────────────────────────────────────
         yf_ticker = _krx_to_yf(req.ticker, req.market)
-        client = YFinanceClient()
-        info = client.get_ticker_info(yf_ticker) or {}
-        price_df = client.get_price_history(yf_ticker, period=req.period)
+        client    = YFinanceClient()
 
-        from data.processors.feature_engine import FeatureEngine
-        processor = DataProcessor()
-        price_df_clean = processor.clean_price_df(price_df) if price_df is not None else price_df
-        price_df_feat = FeatureEngine().add_all_features(price_df_clean) if price_df_clean is not None else price_df_clean
-        metrics = processor.extract_financial_metrics(info, price_df)
+        # get_ticker_info(ticker, market)
+        info = client.get_ticker_info(yf_ticker, req.market) or {}
 
+        # get_price_history(ticker, market, period, interval)
+        price_df = client.get_price_history(yf_ticker, req.market, period=req.period)
+
+        # get_financials(ticker, market) → dict{"income_stmt", "balance_sheet", "cash_flow", ...}
+        fin = {}
+        try:
+            fin = client.get_financials(yf_ticker, req.market) or {}
+        except Exception:
+            pass
+
+        income_stmt   = fin.get("income_stmt",   pd.DataFrame())
+        balance_sheet = fin.get("balance_sheet", pd.DataFrame())
+        cash_flow     = fin.get("cash_flow",     pd.DataFrame())
+
+        # ── 전처리 ────────────────────────────────────────────────────────
+        processor     = DataProcessor()
+        price_df_clean = processor.clean_price_df(price_df) if price_df is not None and not price_df.empty else pd.DataFrame()
+        price_df_feat  = FeatureEngine().add_all_features(price_df_clean) if not price_df_clean.empty else price_df_clean
+
+        # extract_financial_metrics(info, income_stmt, balance_sheet, cash_flow)
+        metrics = processor.extract_financial_metrics(info, income_stmt, balance_sheet, cash_flow)
+
+        # ── 현재가 ────────────────────────────────────────────────────────
         current_price = None
         try:
-            close = price_df["Close"]
-            if hasattr(close, "iloc"):
-                v = close.dropna().iloc[-1]
-                current_price = float(v.iloc[0]) if hasattr(v, "iloc") else float(v)
+            close = price_df_clean["Close"]
+            v = close.dropna().iloc[-1]
+            current_price = float(v.iloc[0]) if hasattr(v, "iloc") else float(v)
         except Exception:
             current_price = info.get("regularMarketPrice") or info.get("currentPrice")
 
+        # ── 분석 ──────────────────────────────────────────────────────────
         sector = info.get("sector", "")
-        f_res  = FundamentalAnalyzer().analyze(yf_ticker, metrics=metrics, price_df=price_df)
-        t_res  = TechnicalAnalyzer().analyze(yf_ticker, df=price_df_feat)
-        macro  = MacroAnalyzer().analyze(sector)
-        ind    = IndustryAnalyzer().analyze(yf_ticker, sector=sector, info=info, price_df=price_df)
-        qual   = QualitativeAnalyzer().analyze(yf_ticker, info=info)
-        risk   = RiskAnalyzer().analyze(yf_ticker, price_df_feat, metrics)
 
+        # FundamentalAnalyzer.analyze(ticker, metrics, price_df, sector_peers)
+        f_res = FundamentalAnalyzer().analyze(yf_ticker, metrics=metrics, price_df=price_df_clean or None)
+
+        # TechnicalAnalyzer.analyze(ticker, df)
+        t_res = TechnicalAnalyzer().analyze(yf_ticker, df=price_df_feat)
+
+        # MacroAnalyzer.analyze(sector)
+        macro = MacroAnalyzer().analyze(sector)
+
+        # IndustryAnalyzer.analyze(ticker, sector, info, price_df)
+        ind = IndustryAnalyzer().analyze(yf_ticker, sector=sector, info=info, price_df=price_df_clean or None)
+
+        # QualitativeAnalyzer.analyze(ticker, info, news)
+        qual = QualitativeAnalyzer().analyze(yf_ticker, info=info)
+
+        # RiskAnalyzer.analyze(ticker, price_df, metrics)
+        risk = RiskAnalyzer().analyze(yf_ticker, price_df_feat, metrics)
+
+        # ScoringEngine.score(ticker, fundamental, technical, macro, industry, qualitative, risk)
         comp = ScoringEngine(weights=weights, mode=req.mode).score(
-            yf_ticker, fundamental=f_res, technical=t_res,
+            yf_ticker,
+            fundamental=f_res, technical=t_res,
             macro=macro, industry=ind, qualitative=qual, risk=risk,
         )
-        rec = Recommender().recommend(comp, current_price=current_price,
-                                      metrics=metrics, risk_details=getattr(risk, 'details', {}))
 
-        beta = info.get("beta") or 1.0
+        # Recommender.recommend(composite, current_price, metrics, risk_details)
+        rec = Recommender().recommend(
+            comp,
+            current_price=current_price,
+            metrics=metrics,
+            risk_details=getattr(risk, "details", {}),
+        )
+
+        # ScenarioEngine.analyze(current_price, sector, beta, macro_details)
+        beta   = info.get("beta") or 1.0
         issues = ScenarioEngine().analyze(
-            current_price=current_price or 0.0,
-            sector=sector, beta=beta,
+            current_price=float(current_price or 0.0),
+            sector=sector,
+            beta=float(beta),
             macro_details=macro.details,
         )
 
+        # ── 직렬화 ────────────────────────────────────────────────────────
         def _safe(v):
             if v is None: return None
-            try: return float(v)
+            try:    return float(v)
             except: return str(v)
 
         return {
-            "ticker": req.ticker,
+            "ticker":    req.ticker,
             "yf_ticker": yf_ticker,
-            "name": info.get("shortName") or info.get("longName") or req.ticker,
-            "sector": sector,
-            "industry": info.get("industry", ""),
+            "name":      info.get("shortName") or info.get("longName") or req.ticker,
+            "sector":    sector,
+            "industry":  info.get("industry", ""),
             "current_price": _safe(current_price),
-            "currency": "KRW" if req.market in ("KRX","KOSPI","KOSDAQ") else "USD",
-            "grade": comp.grade,
+            "currency": "KRW" if req.market.upper() in ("KRX","KOSPI","KOSDAQ") else "USD",
+            "grade":           comp.grade,
             "composite_score": round(comp.composite_score, 1),
             "scores": {
                 "fundamental": round(comp.fundamental_score, 1),
@@ -185,47 +229,47 @@ def analyze(req: AnalyzeRequest):
                 "market_cap":       _safe(metrics.get("market_cap")),
                 "revenue_growth":   _safe(metrics.get("revenue_growth")),
                 "beta":             _safe(info.get("beta")),
-                "mdd":              _safe(risk.mdd),
-                "var_95":           _safe(risk.var_95),
+                "mdd":              _safe(getattr(risk, "mdd", None)),
+                "var_95":           _safe(getattr(risk, "var_95", None)),
             },
-            "target_price":    _safe(rec.target_price),
-            "stop_loss":       _safe(rec.stop_loss),
+            "target_price":     _safe(rec.target_price),
+            "stop_loss":        _safe(rec.stop_loss),
             "suggested_weight": rec.suggested_weight,
-            "key_points":      rec.key_points or [],
-            "risks":           rec.risks or [],
+            "key_points":       rec.key_points or [],
+            "risks":            rec.risks or [],
             "macro": {
                 "cycle": macro.cycle,
                 "score": round(macro.score, 1),
-                "vix":   macro.details.get("vix"),
-                "us_10y_yield": macro.details.get("us_10y_yield"),
+                "vix":               macro.details.get("vix"),
+                "us_10y_yield":      macro.details.get("us_10y_yield"),
                 "geopolitical_score": macro.details.get("geopolitical_score"),
                 "geopolitical_signals": macro.details.get("geopolitical_signals", []),
             },
             "technical": {
-                "short_signal": t_res.short_term_signal,
-                "mid_signal":   t_res.mid_term_signal,
-                "rsi":    t_res.details.get("rsi"),
-                "ma20":   t_res.details.get("ma20"),
-                "ma200":  t_res.details.get("ma200"),
-                "macd":   t_res.details.get("macd"),
+                "short_signal":      t_res.short_term_signal,
+                "mid_signal":        t_res.mid_term_signal,
+                "rsi":               t_res.details.get("rsi"),
+                "ma20":              t_res.details.get("ma20"),
+                "ma200":             t_res.details.get("ma200"),
+                "macd":              t_res.details.get("macd"),
                 "support_levels":    t_res.support_levels,
                 "resistance_levels": t_res.resistance_levels,
             },
             "scenarios": [
                 {
-                    "name": iss.name,
-                    "emoji": iss.emoji,
+                    "name":     iss.name,
+                    "emoji":    iss.emoji,
                     "severity": iss.severity,
-                    "signal": iss.signal,
+                    "signal":   iss.signal,
                     "scenarios": [
                         {
-                            "name": sc.name,
-                            "probability": sc.probability,
-                            "time_horizon": sc.time_horizon,
+                            "name":             sc.name,
+                            "probability":      sc.probability,
+                            "time_horizon":     sc.time_horizon,
                             "price_impact_pct": sc.price_impact_pct,
-                            "projected_price": sc.projected_price,
-                            "description": sc.description,
-                            "sentiment": sc.sentiment,
+                            "projected_price":  sc.projected_price,
+                            "description":      sc.description,
+                            "sentiment":        sc.sentiment,
                         }
                         for sc in iss.scenarios
                     ],
