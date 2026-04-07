@@ -67,8 +67,9 @@ def _get_portfolio(session_id: str):
     if session_id not in _portfolios:
         _portfolios[session_id] = {}
     pm = PortfolioManager(data=_portfolios[session_id])
-    if not _portfolios[session_id]:
-        _portfolios[session_id].update(pm.data)
+    # 처음 생성 시 기본값 초기화
+    if "cash" not in _portfolios[session_id]:
+        pm.reset(10_000_000)
     return pm
 
 # ── 헬퍼 ───────────────────────────────────────────────────────────────────────
@@ -333,12 +334,22 @@ def usd_krw():
 @app.get("/portfolio/{session_id}")
 def get_portfolio(session_id: str):
     pm = _get_portfolio(session_id)
+    # Flutter 앱 모델 필드명에 맞게 변환 (avg_price_krw → avg_cost_krw)
+    def _normalize_holding(h: dict) -> dict:
+        return {
+            "ticker":       h.get("ticker", ""),
+            "market":       h.get("market", ""),
+            "name":         h.get("name", ""),
+            "quantity":     h.get("quantity", 0),
+            "avg_cost_krw": h.get("avg_price_krw") or h.get("avg_cost_krw") or h.get("avg_price", 0),
+            "currency":     h.get("currency", "KRW"),
+        }
     return {
-        "cash": pm.cash,
+        "cash":         pm.cash,
         "initial_cash": pm.initial_cash,
-        "holdings": list(pm.get_holdings().values()),
+        "holdings":     [_normalize_holding(h) for h in pm.get_holdings().values()],
         "transactions": pm.transactions[-50:],
-        "realized_pl": pm.realized_pl(),
+        "realized_pl":  pm.realized_pl(),
     }
 
 
