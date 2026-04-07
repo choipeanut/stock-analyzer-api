@@ -392,19 +392,24 @@ def get_portfolio(session_id: str):
     pm = _get_portfolio(session_id)
     # Flutter 앱 모델 필드명에 맞게 변환 (avg_price_krw → avg_cost_krw)
     def _normalize_holding(h: dict) -> dict:
+        avg_krw = h.get("avg_price_krw") or h.get("avg_cost_krw") or h.get("avg_price", 0)
+        avg_native = h.get("avg_price_native") or avg_krw
         return {
-            "ticker":       h.get("ticker", ""),
-            "market":       h.get("market", ""),
-            "name":         h.get("name", ""),
-            "quantity":     h.get("quantity", 0),
-            "avg_cost_krw": h.get("avg_price_krw") or h.get("avg_cost_krw") or h.get("avg_price", 0),
-            "currency":     h.get("currency", "KRW"),
+            "ticker":          h.get("ticker", ""),
+            "market":          h.get("market", ""),
+            "name":            h.get("name", ""),
+            "quantity":        h.get("quantity", 0),
+            "avg_cost_krw":    avg_krw,
+            "avg_cost_native": avg_native,
+            "currency":        h.get("currency", "KRW"),
         }
+    def _normalize_tx(tx: dict) -> dict:
+        return {**tx, "total_krw": tx.get("total_krw") or tx.get("total", 0)}
     return {
         "cash":         pm.cash,
         "initial_cash": pm.initial_cash,
         "holdings":     [_normalize_holding(h) for h in pm.get_holdings().values()],
-        "transactions": pm.transactions[-50:],
+        "transactions": [_normalize_tx(t) for t in pm.transactions[-50:]],
         "realized_pl":  pm.realized_pl(),
     }
 
