@@ -113,8 +113,10 @@ def analyze(req: AnalyzeRequest):
         info = client.get_ticker_info(yf_ticker) or {}
         price_df = client.get_price_history(yf_ticker, period=req.period)
 
+        from data.processors.feature_engine import FeatureEngine
         processor = DataProcessor()
-        price_df_feat = processor.add_features(price_df)
+        price_df_clean = processor.clean_price_df(price_df) if price_df is not None else price_df
+        price_df_feat = FeatureEngine().add_all_features(price_df_clean) if price_df_clean is not None else price_df_clean
         metrics = processor.extract_financial_metrics(info, price_df)
 
         current_price = None
