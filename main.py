@@ -151,17 +151,21 @@ def analyze(req: AnalyzeRequest):
         # ── 분석 ──────────────────────────────────────────────────────────
         sector = info.get("sector", "")
 
+        # DataFrame None 안전 처리
+        _pdf_clean = price_df_clean if (price_df_clean is not None and not price_df_clean.empty) else None
+        _pdf_feat  = price_df_feat  if (price_df_feat  is not None and not price_df_feat.empty)  else pd.DataFrame()
+
         # FundamentalAnalyzer.analyze(ticker, metrics, price_df, sector_peers)
-        f_res = FundamentalAnalyzer().analyze(yf_ticker, metrics=metrics, price_df=price_df_clean or None)
+        f_res = FundamentalAnalyzer().analyze(yf_ticker, metrics=metrics, price_df=_pdf_clean)
 
         # TechnicalAnalyzer.analyze(ticker, df)
-        t_res = TechnicalAnalyzer().analyze(yf_ticker, df=price_df_feat)
+        t_res = TechnicalAnalyzer().analyze(yf_ticker, df=_pdf_feat)
 
         # MacroAnalyzer.analyze(sector)
         macro = MacroAnalyzer().analyze(sector)
 
         # IndustryAnalyzer.analyze(ticker, sector, info, price_df)
-        ind = IndustryAnalyzer().analyze(yf_ticker, sector=sector, info=info, price_df=price_df_clean or None)
+        ind = IndustryAnalyzer().analyze(yf_ticker, sector=sector, info=info, price_df=_pdf_clean)
 
         # QualitativeAnalyzer.analyze(ticker, info, news)
         qual = QualitativeAnalyzer().analyze(yf_ticker, info=info)
