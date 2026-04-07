@@ -104,7 +104,7 @@ def analyze(req: AnalyzeRequest):
         from scoring.recommender import Recommender
         import yaml, pathlib
 
-        weights_path = pathlib.Path(__file__).parent / "../../stock/stock_analyzer/config/weights.yaml"
+        weights_path = pathlib.Path(__file__).parent / "config/weights.yaml"
         with open(weights_path) as f:
             weights = yaml.safe_load(f)
 
