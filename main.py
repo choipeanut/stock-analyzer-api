@@ -211,6 +211,7 @@ def analyze(req: AnalyzeRequest):
             "sector":    sector,
             "industry":  info.get("industry", ""),
             "current_price": _safe(current_price),
+            "market":   req.market,
             "currency": "KRW" if req.market.upper() in ("KRX","KOSPI","KOSDAQ") else "USD",
             "grade":           comp.grade,
             "composite_score": round(comp.composite_score, 1),
@@ -310,6 +311,61 @@ def ticker_info(ticker: str, market: str = "KRX"):
         price = info.get("regularMarketPrice") or info.get("currentPrice")
         currency = "USD" if market.upper() in ("NASDAQ","NYSE","SP500","AMEX") else "KRW"
         return {"name": name, "price_native": price, "currency": currency}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/price-history")
+def price_history(ticker: str, market: str = "KRX", period: str = "6mo"):
+    """주가 히스토리 (선 그래프용)"""
+    try:
+        from data.collectors.yfinance_client import YFinanceClient
+        from data.processors.data_processor import DataProcessor
+        import pandas as pd
+
+        yf_t = _krx_to_yf(ticker, market)
+        client = YFinanceClient()
+        df = client.get_price_history(yf_t, market, period=period)
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            return {"prices": []}
+
+        # 멀티레벨 컬럼 평탄화
+        if hasattr(df.columns, 'levels'):
+            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+
+        processor = DataProcessor()
+        try:
+            df = processor.clean_price_df(df)
+        except Exception:
+            pass
+
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            return {"prices": []}
+
+        # Close 컬럼 찾기
+        close_col = None
+        for c in ['Close', 'close', 'Adj Close']:
+            if c in df.columns:
+                close_col = c
+                break
+        if close_col is None:
+            return {"prices": []}
+
+        prices = []
+        for i, (idx, row) in enumerate(df.iterrows()):
+            try:
+                v = row[close_col]
+                if hasattr(v, 'iloc'):
+                    v = float(v.iloc[0])
+                else:
+                    v = float(v)
+                if v != v:  # NaN
+                    continue
+                prices.append({"t": i, "c": round(v, 2), "d": str(idx)[:10]})
+            except Exception:
+                continue
+
+        return {"prices": prices}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
