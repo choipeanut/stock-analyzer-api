@@ -129,8 +129,8 @@ def analyze(req: AnalyzeRequest):
             current_price = info.get("regularMarketPrice") or info.get("currentPrice")
 
         sector = info.get("sector", "")
-        f_res  = FundamentalAnalyzer().analyze(yf_ticker, info=info, metrics=metrics)
-        t_res  = TechnicalAnalyzer().analyze(yf_ticker, price_df=price_df_feat)
+        f_res  = FundamentalAnalyzer().analyze(yf_ticker, metrics=metrics, price_df=price_df)
+        t_res  = TechnicalAnalyzer().analyze(yf_ticker, df=price_df_feat)
         macro  = MacroAnalyzer().analyze(sector)
         ind    = IndustryAnalyzer().analyze(yf_ticker, sector=sector, info=info, price_df=price_df)
         qual   = QualitativeAnalyzer().analyze(yf_ticker, info=info)
@@ -141,7 +141,7 @@ def analyze(req: AnalyzeRequest):
             macro=macro, industry=ind, qualitative=qual, risk=risk,
         )
         rec = Recommender().recommend(comp, current_price=current_price,
-                                      metrics=metrics, risk_details=risk.details)
+                                      metrics=metrics, risk_details=getattr(risk, 'details', {}))
 
         beta = info.get("beta") or 1.0
         issues = ScenarioEngine().analyze(
