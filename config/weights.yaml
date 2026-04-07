@@ -1,0 +1,59 @@
+# 분석 모듈 가중치 설정
+# Composite Score = Σ(Module_Score_i × Weight_i) - Risk_Penalty
+
+modes:
+  default:
+    fundamental: 0.35
+    technical: 0.20
+    macro: 0.15
+    industry: 0.15
+    qualitative: 0.10
+    risk_penalty: 0.05
+
+  growth:
+    fundamental: 0.40
+    technical: 0.15
+    macro: 0.15
+    industry: 0.20
+    qualitative: 0.10
+    risk_penalty: 0.05
+
+  value:
+    fundamental: 0.45
+    technical: 0.10
+    macro: 0.15
+    industry: 0.20
+    qualitative: 0.08
+    risk_penalty: 0.02
+
+  dividend:
+    fundamental: 0.45
+    technical: 0.10
+    macro: 0.15
+    industry: 0.20
+    qualitative: 0.08
+    risk_penalty: 0.02
+
+  trading:
+    fundamental: 0.10
+    technical: 0.45
+    macro: 0.15
+    industry: 0.10
+    qualitative: 0.05
+    risk_penalty: 0.15
+
+# 기본적 분석 내 세부 가중치
+fundamental_sub:
+  profitability: 0.25
+  growth: 0.25
+  stability: 0.20
+  cashflow: 0.15
+  valuation: 0.15
+
+# 기술적 분석 내 세부 가중치
+technical_sub:
+  trend: 0.30
+  momentum: 0.25
+  volume: 0.20
+  volatility: 0.15
+  pattern: 0.10

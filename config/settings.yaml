@@ -1,0 +1,68 @@
+# 전역 설정
+app:
+  name: "Stock Analyzer"
+  version: "1.0.0"
+  log_level: "INFO"
+  log_format: "json"
+
+# 데이터 수집 설정
+data:
+  default_period: "3y"
+  cache_ttl_financial: 86400    # 재무제표 캐시: 24시간(초)
+  cache_ttl_price: 300          # 주가 캐시: 5분(초)
+  api_retry_count: 3
+  api_retry_delay: 2            # 초
+  batch_size: 50                # 스크리닝 배치 크기
+
+# 데이터베이스(캐시)
+database:
+  sqlite_path: "data/cache/stock_cache.db"
+  redis_url: null               # Redis 사용 시 설정 (예: redis://localhost:6379)
+
+# 분석 기본값
+analysis:
+  default_market: "KRX"
+  default_mode: "default"
+  technical:
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bb_period: 20
+    bb_std: 2
+    atr_period: 14
+    stoch_k: 14
+    stoch_d: 3
+    cci_period: 20
+    ma_periods: [20, 60, 120, 200]
+  fundamental:
+    dcf_wacc: 0.10
+    dcf_terminal_growth: 0.025
+    dcf_projection_years: 5
+  risk:
+    var_confidence: [0.95, 0.99]
+    rolling_vol_window: 20
+    mdd_window: 252
+
+# 리포트 설정
+report:
+  default_format: "md"
+  output_dir: "reports"
+  html_template: "report/templates/report.html"
+  pdf_css: "report/templates/pdf_style.css"
+
+# 스크리닝 최소 기준
+screening:
+  min_market_cap_krw: 100_000_000_000   # 1천억
+  min_market_cap_usd: 100_000_000       # 1억달러
+  min_avg_volume_krw: 1_000_000_000     # 10억
+  min_avg_volume_usd: 500_000
+  min_listed_days: 365
+
+# 투자 등급 임계값
+grade:
+  strong_buy: 90
+  buy: 75
+  hold: 55
+  sell: 40
+  # 0~39: STRONG SELL
