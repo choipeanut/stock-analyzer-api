@@ -5,14 +5,41 @@
 
 Flutter 앱이 이 서버에 HTTP 요청을 보냅니다.
 """
-import sys, os
+import sys, os, json
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
+from pathlib import Path
 import traceback
+
+# ── 디스크 기반 포트폴리오 영속성 (/tmp는 sleep/wake 사이에서 유지됨) ────────────
+_PF_DIR = Path("/tmp/stock_pf")
+_PF_DIR.mkdir(exist_ok=True)
+
+def _pf_path(session_id: str) -> Path:
+    # session_id는 UUID 형식이라 파일명으로 안전
+    safe = "".join(c for c in session_id if c.isalnum() or c == "-")
+    return _PF_DIR / f"{safe}.json"
+
+def _save_to_disk(session_id: str, data: dict) -> None:
+    try:
+        with open(_pf_path(session_id), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, default=str)
+    except Exception:
+        pass
+
+def _load_from_disk(session_id: str) -> dict | None:
+    try:
+        p = _pf_path(session_id)
+        if p.exists():
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
 
 app = FastAPI(title="Stock Analyzer API", version="1.0.0")
 
@@ -65,11 +92,13 @@ _portfolios: dict = {}
 def _get_portfolio(session_id: str):
     from portfolio.manager import PortfolioManager
     if session_id not in _portfolios:
-        _portfolios[session_id] = {}
+        # 디스크에서 복원 시도 (서버 재기동 / sleep→wake 후)
+        disk = _load_from_disk(session_id)
+        _portfolios[session_id] = disk if disk is not None else {}
     pm = PortfolioManager(data=_portfolios[session_id])
-    # 처음 생성 시 기본값 초기화
     if "cash" not in _portfolios[session_id]:
         pm.reset(10_000_000)
+        _save_to_disk(session_id, _portfolios[session_id])
     return pm
 
 # ── 헬퍼 ───────────────────────────────────────────────────────────────────────
@@ -422,6 +451,7 @@ def portfolio_buy(req: BuyRequest):
                     req.price_native, req.quantity,
                     currency=req.currency, fx_rate=req.fx_rate, note=req.note)
         _portfolios[req.session_id] = pm.data
+        _save_to_disk(req.session_id, pm.data)
         return {"ok": True, "transaction": tx, "cash": pm.cash}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -435,6 +465,7 @@ def portfolio_sell(req: SellRequest):
                      req.price_native, req.quantity,
                      currency=req.currency, fx_rate=req.fx_rate, note=req.note)
         _portfolios[req.session_id] = pm.data
+        _save_to_disk(req.session_id, pm.data)
         return {"ok": True, "transaction": tx, "cash": pm.cash}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -445,4 +476,26 @@ def portfolio_reset(session_id: str, initial_cash: float = 10_000_000):
     pm = _get_portfolio(session_id)
     pm.reset(initial_cash)
     _portfolios[session_id] = pm.data
+    _save_to_disk(session_id, pm.data)
+    return {"ok": True}
+
+
+@app.post("/portfolio/{session_id}/restore")
+def portfolio_restore(session_id: str, body: dict = Body(...)):
+    """앱 로컬 캐시에서 포트폴리오 복원 (서버가 재기동돼 데이터를 잃었을 때)"""
+    from portfolio.manager import PortfolioManager
+    # body는 GET /portfolio 응답 형식
+    transactions = body.get("transactions", [])
+    for tx in transactions:
+        # total_krw → total 필드명 매핑
+        if "total" not in tx and "total_krw" in tx:
+            tx["total"] = tx["total_krw"]
+    manager_data = {
+        "cash":         body.get("cash", 10_000_000),
+        "initial_cash": body.get("initial_cash", 10_000_000),
+        "transactions": transactions,
+        "snapshots":    body.get("snapshots", []),
+    }
+    _portfolios[session_id] = manager_data
+    _save_to_disk(session_id, manager_data)
     return {"ok": True}
