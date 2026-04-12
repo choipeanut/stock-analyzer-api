@@ -247,6 +247,18 @@ def analyze(req: AnalyzeRequest):
         # extract_financial_metrics(info, income_stmt, balance_sheet, cash_flow)
         metrics = processor.extract_financial_metrics(info, income_stmt, balance_sheet, cash_flow)
 
+        # ── fast_info로 빠진 지표 보완 (전 시장 공통) ────────────────────
+        try:
+            import yfinance as _yf3
+            fi3 = _yf3.Ticker(yf_ticker).fast_info
+            def _fi3(attr):
+                v = getattr(fi3, attr, None)
+                return float(v) if v is not None else None
+            if not metrics.get("market_cap"):
+                metrics["market_cap"] = _fi3("market_cap")
+        except Exception:
+            pass
+
         # ── 한국 주식: Naver로 지표 보완 ─────────────────────────────────
         is_kr = req.market.upper() in ("KRX", "KOSPI", "KOSDAQ")
         if is_kr and req.ticker.isdigit():
@@ -269,16 +281,33 @@ def analyze(req: AnalyzeRequest):
 
         # ── 현재가 ────────────────────────────────────────────────────────
         current_price = None
+        # 1순위: 주가 DataFrame 마지막 종가
         try:
-            close = price_df_clean["close"] if "close" in price_df_clean.columns else price_df_clean["Close"]
+            col = "close" if "close" in price_df_clean.columns else "Close"
+            close = price_df_clean[col]
             v = close.dropna().iloc[-1]
             current_price = float(v.iloc[0]) if hasattr(v, "iloc") else float(v)
         except Exception:
-            current_price = (info.get("regularMarketPrice")
-                             or info.get("currentPrice")
+            pass
+        # 2순위: info dict
+        if not current_price:
+            current_price = (info.get("currentPrice")
+                             or info.get("regularMarketPrice")
                              or info.get("previousClose"))
-            if current_price is None and is_kr and req.ticker.isdigit():
-                current_price = _naver_stock(req.ticker).get("price")
+        # 3순위: fast_info
+        if not current_price:
+            try:
+                import yfinance as _yf2
+                fi2 = _yf2.Ticker(yf_ticker).fast_info
+                current_price = (getattr(fi2, "last_price", None)
+                                 or getattr(fi2, "regular_market_price", None))
+                if current_price:
+                    current_price = float(current_price)
+            except Exception:
+                pass
+        # 4순위: 한국 주식 Naver
+        if not current_price and is_kr and req.ticker.isdigit():
+            current_price = _naver_stock(req.ticker).get("price")
 
         # ── 분석 ──────────────────────────────────────────────────────────
         sector = info.get("sector", "")
@@ -455,11 +484,23 @@ def ticker_info(ticker: str, market: str = "KRX"):
         if not name:
             name = info.get("shortName") or info.get("longName") or ticker
         if price is None:
-            price = (info.get("regularMarketPrice")
-                     or info.get("currentPrice")
+            price = (info.get("currentPrice")
+                     or info.get("regularMarketPrice")
                      or info.get("previousClose"))
 
-        # ── 최후 폴백: 최근 5일 종가 ────────────────────────────────────────
+        # ── fast_info 직접 접근 ──────────────────────────────────────────
+        if price is None:
+            try:
+                import yfinance as _yf
+                fi = _yf.Ticker(yf_t).fast_info
+                price = (getattr(fi, "last_price", None)
+                         or getattr(fi, "regular_market_price", None))
+                if price:
+                    price = float(price)
+            except Exception:
+                pass
+
+        # ── 최후 폴백: 최근 5일 종가 다운로드 ──────────────────────────────
         if price is None:
             try:
                 df5 = client.get_price_history(yf_t, market, period="5d")
@@ -468,7 +509,7 @@ def ticker_info(ticker: str, market: str = "KRX"):
             except Exception:
                 pass
 
-        return {"name": name or ticker, "price_native": price, "currency": currency}
+        return {"name": name or ticker, "price_native": round(price, 4) if price else None, "currency": currency}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

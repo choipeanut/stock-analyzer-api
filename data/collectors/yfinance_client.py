@@ -60,17 +60,65 @@ class YFinanceClient:
     # ------------------------------------------------------------------ #
 
     def get_ticker_info(self, ticker: str, market: str = "KRX") -> dict[str, Any]:
-        """종목 기본 정보 반환"""
+        """종목 기본 정보 반환 (yfinance 0.2.x 호환 + fast_info 보완)"""
         yf_ticker = _krx_to_yf(ticker, market)
         cache_key = f"info:{yf_ticker}"
         cached = self.cache.get(cache_key)
         if cached:
             return cached
 
-        data = self._fetch_with_retry(lambda: yf.Ticker(yf_ticker, session=self.session).info)
-        if not data:
-            data = {}
-        self.cache.set(cache_key, data, ttl=86400)
+        t = yf.Ticker(yf_ticker, session=self.session)
+
+        # ① .info 시도 (느리지만 가장 많은 정보)
+        data = self._fetch_with_retry(lambda: t.info) or {}
+
+        # ② fast_info로 빠진 핵심 필드 보완 (yfinance 0.2.x에서 .info보다 안정적)
+        try:
+            fi = t.fast_info
+            def _fi(attr):
+                v = getattr(fi, attr, None)
+                return float(v) if v is not None else None
+
+            if not data.get("currentPrice") and not data.get("regularMarketPrice"):
+                p = _fi("last_price") or _fi("regular_market_price")
+                if p:
+                    data["currentPrice"] = p
+            if not data.get("marketCap"):
+                mc = _fi("market_cap")
+                if mc:
+                    data["marketCap"] = mc
+            if not data.get("fiftyTwoWeekHigh"):
+                h = _fi("year_high")
+                if h:
+                    data["fiftyTwoWeekHigh"] = h
+            if not data.get("fiftyTwoWeekLow"):
+                lo = _fi("year_low")
+                if lo:
+                    data["fiftyTwoWeekLow"] = lo
+            if not data.get("fiftyDayAverage"):
+                ma50 = _fi("fifty_day_average")
+                if ma50:
+                    data["fiftyDayAverage"] = ma50
+            if not data.get("twoHundredDayAverage"):
+                ma200 = _fi("two_hundred_day_average")
+                if ma200:
+                    data["twoHundredDayAverage"] = ma200
+        except Exception:
+            pass
+
+        # ③ 가격이 여전히 없으면 최근 1일 다운로드
+        if not data.get("currentPrice") and not data.get("regularMarketPrice"):
+            try:
+                df1 = yf.download(yf_ticker, period="5d", interval="1d",
+                                  progress=False, auto_adjust=True)
+                if not df1.empty:
+                    v = _close_scalar(df1)
+                    if v:
+                        data["currentPrice"] = v
+            except Exception:
+                pass
+
+        self.cache.set(cache_key, data, ttl=3600)   # 1시간 캐시 (너무 오래되면 가격 stale)
         return data
 
     def get_price_history(
