@@ -101,6 +101,84 @@ def _get_portfolio(session_id: str):
         _save_to_disk(session_id, _portfolios[session_id])
     return pm
 
+# ── 한국 주식 Naver 데이터 헬퍼 ──────────────────────────────────────────────────
+
+def _naver_stock(ticker: str) -> dict:
+    """Naver 모바일 API에서 한국 주식 가격 + 재무비율 수집.
+    ticker: 6자리 숫자 코드 (005930 등)
+    반환: {"price": float, "per": float, "pbr": float, "roe": float, ...}
+    """
+    import requests as _req
+    h = {"User-Agent": "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"}
+    result: dict = {}
+
+    # ① 이름 + 현재가 (basic endpoint)
+    try:
+        r = _req.get(
+            f"https://m.stock.naver.com/api/stock/{ticker}/basic",
+            headers=h, timeout=5
+        )
+        d = r.json()
+        result["name"] = d.get("stockName") or d.get("itemName") or d.get("stockItemName")
+        for key in ("closePrice", "currentPrice", "stockCurrentPrice", "nv", "rv"):
+            raw = d.get(key, "")
+            if raw:
+                try:
+                    result["price"] = float(str(raw).replace(",", ""))
+                    break
+                except Exception:
+                    pass
+        if not result.get("price"):
+            # stockItemTotalInfos 배열에서 현재가 찾기
+            for item in d.get("stockItemTotalInfos", []):
+                if item.get("key") in ("현재가", "시가"):
+                    try:
+                        result["price"] = float(str(item.get("value", "")).replace(",", ""))
+                        break
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # ② 재무 비율 (finance summary endpoint)
+    for url in [
+        f"https://m.stock.naver.com/api/stock/{ticker}/finance/ratios",
+        f"https://m.stock.naver.com/api/stock/{ticker}/finance/summary",
+    ]:
+        try:
+            r = _req.get(url, headers=h, timeout=5)
+            if r.status_code != 200:
+                continue
+            d = r.json()
+
+            def _pick(*keys):
+                """중첩 dict에서 키 목록 중 처음 발견된 숫자 반환"""
+                for k in keys:
+                    for node in [d, d.get("currentPerformance", {}),
+                                 d.get("finance", {}), d.get("ratios", {}),
+                                 d.get("summaryFinancialInformations", {})]:
+                        if isinstance(node, dict) and k in node:
+                            v = node[k]
+                            try:
+                                return float(v)
+                            except Exception:
+                                pass
+                return None
+
+            result.setdefault("per",           _pick("per", "PER", "trailingPer"))
+            result.setdefault("pbr",           _pick("pbr", "PBR"))
+            result.setdefault("roe",           _pick("roe", "ROE"))
+            result.setdefault("operating_margin", _pick("operatingMarginRate", "영업이익률"))
+            result.setdefault("debt_to_equity",_pick("debtRatio", "부채비율"))
+            result.setdefault("dividend_yield",_pick("dividendYield", "배당수익률"))
+            result.setdefault("revenue_growth",_pick("salesGrowthRate", "매출액증가율"))
+            break
+        except Exception:
+            continue
+
+    return result
+
+
 # ── 헬퍼 ───────────────────────────────────────────────────────────────────────
 
 def _krx_to_yf(ticker: str, market: str) -> str:
@@ -169,14 +247,38 @@ def analyze(req: AnalyzeRequest):
         # extract_financial_metrics(info, income_stmt, balance_sheet, cash_flow)
         metrics = processor.extract_financial_metrics(info, income_stmt, balance_sheet, cash_flow)
 
+        # ── 한국 주식: Naver로 지표 보완 ─────────────────────────────────
+        is_kr = req.market.upper() in ("KRX", "KOSPI", "KOSDAQ")
+        if is_kr and req.ticker.isdigit():
+            nd = _naver_stock(req.ticker)
+            # yfinance가 못 가져온 지표만 채움
+            def _fill(key, nkey, divisor=1.0):
+                if not metrics.get(key) and nd.get(nkey) is not None:
+                    try:
+                        v = float(nd[nkey])
+                        metrics[key] = v / divisor if divisor != 1.0 else v
+                    except Exception:
+                        pass
+            _fill("pe_ratio",        "per")
+            _fill("pb_ratio",        "pbr")
+            _fill("roe",             "roe",             100.0)
+            _fill("operating_margin","operating_margin", 100.0)
+            _fill("debt_to_equity",  "debt_to_equity")
+            _fill("dividend_yield",  "dividend_yield",   100.0)
+            _fill("revenue_growth",  "revenue_growth",   100.0)
+
         # ── 현재가 ────────────────────────────────────────────────────────
         current_price = None
         try:
-            close = price_df_clean["Close"]
+            close = price_df_clean["close"] if "close" in price_df_clean.columns else price_df_clean["Close"]
             v = close.dropna().iloc[-1]
             current_price = float(v.iloc[0]) if hasattr(v, "iloc") else float(v)
         except Exception:
-            current_price = info.get("regularMarketPrice") or info.get("currentPrice")
+            current_price = (info.get("regularMarketPrice")
+                             or info.get("currentPrice")
+                             or info.get("previousClose"))
+            if current_price is None and is_kr and req.ticker.isdigit():
+                current_price = _naver_stock(req.ticker).get("price")
 
         # ── 분석 ──────────────────────────────────────────────────────────
         sector = info.get("sector", "")
@@ -320,26 +422,53 @@ def analyze(req: AnalyzeRequest):
 def ticker_info(ticker: str, market: str = "KRX"):
     """종목명 + 현재가 조회 (매수 폼 자동완성용)"""
     try:
-        from data.collectors.yfinance_client import YFinanceClient
-        import requests as req_lib
+        from data.collectors.yfinance_client import YFinanceClient, _close_scalar
         yf_t = _krx_to_yf(ticker, market)
         client = YFinanceClient()
-        info = client.get_ticker_info(yf_t) or {}
-        name = None
-        is_kr = market.upper() in ("KRX","KOSPI","KOSDAQ")
-        if is_kr:
+        is_kr = market.upper() in ("KRX", "KOSPI", "KOSDAQ")
+        currency = "USD" if market.upper() in ("NASDAQ", "NYSE", "SP500", "AMEX") else "KRW"
+
+        name: str | None = None
+        price: float | None = None
+
+        # ── 한국 주식: Naver API 우선 ─────────────────────────────────────────
+        if is_kr and ticker.isdigit():
+            nd = _naver_stock(ticker)
+            name  = nd.get("name")       # basic 에서 가져온 경우 있음
+            price = nd.get("price")      # closePrice 파싱값
+
+        # ── Naver에서 이름 못 얻었을 때 basic 한 번 더 ──────────────────────
+        if is_kr and not name:
             try:
-                r = req_lib.get(f"https://m.stock.naver.com/api/stock/{ticker}/basic",
-                                headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+                import requests as _r
+                r = _r.get(
+                    f"https://m.stock.naver.com/api/stock/{ticker}/basic",
+                    headers={"User-Agent": "Mozilla/5.0"}, timeout=5
+                )
                 d = r.json()
                 name = d.get("stockName") or d.get("itemName")
             except Exception:
                 pass
+
+        # ── yfinance info (USD 주식 or fallback) ────────────────────────────
+        info = client.get_ticker_info(yf_t, market) or {}
         if not name:
             name = info.get("shortName") or info.get("longName") or ticker
-        price = info.get("regularMarketPrice") or info.get("currentPrice")
-        currency = "USD" if market.upper() in ("NASDAQ","NYSE","SP500","AMEX") else "KRW"
-        return {"name": name, "price_native": price, "currency": currency}
+        if price is None:
+            price = (info.get("regularMarketPrice")
+                     or info.get("currentPrice")
+                     or info.get("previousClose"))
+
+        # ── 최후 폴백: 최근 5일 종가 ────────────────────────────────────────
+        if price is None:
+            try:
+                df5 = client.get_price_history(yf_t, market, period="5d")
+                if not (df5 is None or df5.empty):
+                    price = _close_scalar(df5)
+            except Exception:
+                pass
+
+        return {"name": name or ticker, "price_native": price, "currency": currency}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
